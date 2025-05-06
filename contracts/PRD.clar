@@ -121,3 +121,50 @@
         relief-amount: (var-get relief-amount-per-person)
     })
 )
+
+
+(define-public (batch-register-recipients 
+    (recipients (list 200 principal))
+    (names (list 200 (string-ascii 50)))
+    (statuses (list 200 (string-ascii 20))))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq (len recipients) (len names)) ERR-INVALID-AMOUNT)
+        (asserts! (is-eq (len names) (len statuses)) ERR-INVALID-AMOUNT)
+        (ok (map register-recipient-internal recipients names statuses))
+    )
+)
+
+(define-private (register-recipient-internal 
+    (recipient principal) 
+    (name (string-ascii 50))
+    (status (string-ascii 20)))
+    (if (is-none (map-get? registered-recipients recipient))
+        (map-set registered-recipients 
+            recipient
+            {
+                name: name,
+                status: status,
+                registration-time: stacks-block-height,
+                claimed: false
+            }
+        )
+        false
+    )
+)
+
+
+(define-constant ERR-NO-FUNDS (err u106))
+
+(define-public (emergency-withdraw (amount uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (<= amount (var-get total-funds)) ERR-INSUFFICIENT-FUNDS)
+        (asserts! (not (var-get distribution-active)) ERR-NOT-AUTHORIZED)
+        
+        (try! (as-contract (stx-transfer? amount tx-sender (var-get contract-owner))))
+        (var-set total-funds (- (var-get total-funds) amount))
+        (ok true)
+    )
+)
