@@ -168,3 +168,151 @@
         (ok true)
     )
 )
+
+
+(define-constant ERR-ROUND-NOT-FOUND (err u107))
+(define-constant ERR-ROUND-NOT-ACTIVE (err u108))
+(define-constant ERR-ROUND-ALREADY-EXISTS (err u109))
+
+(define-data-var current-round-id uint u0)
+(define-data-var next-round-id uint u1)
+
+(define-map distribution-rounds
+    uint
+    {
+        round-name: (string-ascii 50),
+        relief-amount: uint,
+        start-block: uint,
+        end-block: uint,
+        is-active: bool,
+        total-distributed: uint,
+        recipients-count: uint
+    }
+)
+
+(define-map round-claims
+    {round-id: uint, recipient: principal}
+    {
+        amount: uint,
+        claim-time: uint,
+        claim-block: uint
+    }
+)
+
+(define-public (create-distribution-round 
+    (round-name (string-ascii 50))
+    (relief-amount uint)
+    (duration-blocks uint))
+    (let (
+        (round-id (var-get next-round-id))
+        (start-block stacks-block-height)
+        (end-block (+ stacks-block-height duration-blocks))
+        )
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (> relief-amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (> duration-blocks u0) ERR-INVALID-AMOUNT)
+        (asserts! (is-none (map-get? distribution-rounds round-id)) ERR-ROUND-ALREADY-EXISTS)
+        
+        (map-set distribution-rounds round-id {
+            round-name: round-name,
+            relief-amount: relief-amount,
+            start-block: start-block,
+            end-block: end-block,
+            is-active: true,
+            total-distributed: u0,
+            recipients-count: u0
+        })
+        (var-set current-round-id round-id)
+        (var-set next-round-id (+ round-id u1))
+        (ok round-id)
+    )
+)
+
+(define-public (claim-round-relief (round-id uint))
+    (let (
+        (recipient tx-sender)
+        (recipient-data (unwrap! (map-get? registered-recipients recipient) ERR-NOT-REGISTERED))
+        (round-data (unwrap! (map-get? distribution-rounds round-id) ERR-ROUND-NOT-FOUND))
+        (relief-amount (get relief-amount round-data))
+        (claim-key {round-id: round-id, recipient: recipient})
+        )
+        (asserts! (get is-active round-data) ERR-ROUND-NOT-ACTIVE)
+        (asserts! (>= stacks-block-height (get start-block round-data)) ERR-ROUND-NOT-ACTIVE)
+        (asserts! (<= stacks-block-height (get end-block round-data)) ERR-ROUND-NOT-ACTIVE)
+        (asserts! (is-none (map-get? round-claims claim-key)) ERR-ALREADY-CLAIMED)
+        (asserts! (>= (var-get total-funds) relief-amount) ERR-INSUFFICIENT-FUNDS)
+        
+        (try! (as-contract (stx-transfer? relief-amount tx-sender recipient)))
+        (var-set total-funds (- (var-get total-funds) relief-amount))
+        
+        (map-set round-claims claim-key {
+            amount: relief-amount,
+            claim-time: stacks-block-height,
+            claim-block: stacks-block-height
+        })
+        
+        (map-set distribution-rounds round-id 
+            (merge round-data {
+                total-distributed: (+ (get total-distributed round-data) relief-amount),
+                recipients-count: (+ (get recipients-count round-data) u1)
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (deactivate-round (round-id uint))
+    (let (
+        (round-data (unwrap! (map-get? distribution-rounds round-id) ERR-ROUND-NOT-FOUND))
+        )
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (map-set distribution-rounds round-id (merge round-data {is-active: false}))
+        (ok true)
+    )
+)
+
+(define-public (extend-round (round-id uint) (additional-blocks uint))
+    (let (
+        (round-data (unwrap! (map-get? distribution-rounds round-id) ERR-ROUND-NOT-FOUND))
+        (new-end-block (+ (get end-block round-data) additional-blocks))
+        )
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (> additional-blocks u0) ERR-INVALID-AMOUNT)
+        (map-set distribution-rounds round-id (merge round-data {end-block: new-end-block}))
+        (ok new-end-block)
+    )
+)
+
+(define-read-only (get-round-info (round-id uint))
+    (map-get? distribution-rounds round-id)
+)
+
+(define-read-only (get-recipient-round-claim (round-id uint) (recipient principal))
+    (map-get? round-claims {round-id: round-id, recipient: recipient})
+)
+
+(define-read-only (has-claimed-round (round-id uint) (recipient principal))
+    (is-some (map-get? round-claims {round-id: round-id, recipient: recipient}))
+)
+
+(define-read-only (get-current-round-id)
+    (ok (var-get current-round-id))
+)
+
+(define-read-only (get-active-rounds)
+    (ok {
+        current-round: (var-get current-round-id),
+        next-round: (var-get next-round-id)
+    })
+)
+
+(define-read-only (is-round-active (round-id uint))
+    (match (map-get? distribution-rounds round-id)
+        round-data (and 
+            (get is-active round-data)
+            (>= stacks-block-height (get start-block round-data))
+            (<= stacks-block-height (get end-block round-data))
+        )
+        false
+    )
+)
