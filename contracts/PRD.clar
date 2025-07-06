@@ -317,41 +317,6 @@
     )
 )
 
-(define-constant ERR-NOT-GUARDIAN (err u110))
-(define-constant ERR-PROPOSAL-NOT-FOUND (err u111))
-(define-constant ERR-PROPOSAL-EXPIRED (err u112))
-(define-constant ERR-ALREADY-VOTED (err u113))
-(define-constant ERR-PROPOSAL-NOT-PASSED (err u114))
-(define-constant ERR-PROPOSAL-ALREADY-EXECUTED (err u115))
-(define-constant ERR-INSUFFICIENT-SIGNATURES (err u116))
-
-(define-data-var proposal-counter uint u0)
-(define-data-var required-signatures uint u2)
-(define-data-var guardian-count uint u0)
-
-(define-map guardians principal bool)
-
-(define-map proposals
-    uint
-    {
-        proposer: principal,
-        proposal-type: (string-ascii 20),
-        target-amount: uint,
-        target-recipient: (optional principal),
-        description: (string-ascii 200),
-        created-at: uint,
-        expires-at: uint,
-        yes-votes: uint,
-        no-votes: uint,
-        executed: bool,
-        passed: bool
-    }
-)
-
-(define-map proposal-votes
-    {proposal-id: uint, voter: principal}
-    {vote: bool, voted-at: uint}
-)
 
 (define-public (add-guardian (guardian principal))
     (begin
