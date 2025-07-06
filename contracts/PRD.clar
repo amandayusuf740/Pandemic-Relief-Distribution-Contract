@@ -10,6 +10,41 @@
 (define-data-var distribution-active bool false)
 (define-data-var relief-amount-per-person uint u0)
 
+(define-constant ERR-NOT-GUARDIAN (err u110))
+(define-constant ERR-PROPOSAL-NOT-FOUND (err u111))
+(define-constant ERR-PROPOSAL-EXPIRED (err u112))
+(define-constant ERR-ALREADY-VOTED (err u113))
+(define-constant ERR-PROPOSAL-NOT-PASSED (err u114))
+(define-constant ERR-PROPOSAL-ALREADY-EXECUTED (err u115))
+(define-constant ERR-INSUFFICIENT-SIGNATURES (err u116))
+
+(define-data-var proposal-counter uint u0)
+(define-data-var required-signatures uint u2)
+(define-data-var guardian-count uint u0)
+
+(define-map guardians principal bool)
+
+(define-map proposals
+    uint
+    {
+        proposer: principal,
+        proposal-type: (string-ascii 20),
+        target-amount: uint,
+        target-recipient: (optional principal),
+        description: (string-ascii 200),
+        created-at: uint,
+        expires-at: uint,
+        yes-votes: uint,
+        no-votes: uint,
+        executed: bool,
+        passed: bool
+    }
+)
+
+(define-map proposal-votes
+    {proposal-id: uint, voter: principal}
+    {vote: bool, voted-at: uint}
+)
 (define-map registered-recipients 
     principal 
     {
@@ -315,4 +350,119 @@
         )
         false
     )
+)
+
+
+(define-public (add-guardian (guardian principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (not (default-to false (map-get? guardians guardian))) ERR-ALREADY-REGISTERED)
+        (map-set guardians guardian true)
+        (var-set guardian-count (+ (var-get guardian-count) u1))
+        (ok true)
+    )
+)
+
+(define-public (remove-guardian (guardian principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (default-to false (map-get? guardians guardian)) ERR-NOT-REGISTERED)
+        (map-set guardians guardian false)
+        (var-set guardian-count (- (var-get guardian-count) u1))
+        (ok true)
+    )
+)
+
+(define-public (set-required-signatures (count uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (> count u0) ERR-INVALID-AMOUNT)
+        (asserts! (<= count (var-get guardian-count)) ERR-INVALID-AMOUNT)
+        (ok (var-set required-signatures count))
+    )
+)
+
+(define-public (create-proposal 
+    (proposal-type (string-ascii 20))
+    (target-amount uint)
+    (target-recipient (optional principal))
+    (description (string-ascii 200))
+    (duration-blocks uint))
+    (let (
+        (proposal-id (+ (var-get proposal-counter) u1))
+        (proposer tx-sender)
+        (created-at stacks-block-height)
+        (expires-at (+ stacks-block-height duration-blocks))
+        )
+        (asserts! (default-to false (map-get? guardians proposer)) ERR-NOT-GUARDIAN)
+        (asserts! (> duration-blocks u0) ERR-INVALID-AMOUNT)
+        
+        (map-set proposals proposal-id {
+            proposer: proposer,
+            proposal-type: proposal-type,
+            target-amount: target-amount,
+            target-recipient: target-recipient,
+            description: description,
+            created-at: created-at,
+            expires-at: expires-at,
+            yes-votes: u0,
+            no-votes: u0,
+            executed: false,
+            passed: false
+        })
+        
+        (var-set proposal-counter proposal-id)
+        (ok proposal-id)
+    )
+)
+
+(define-public (vote-proposal (proposal-id uint) (vote bool))
+    (let (
+        (voter tx-sender)
+        (proposal-data (unwrap! (map-get? proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
+        (vote-key {proposal-id: proposal-id, voter: voter})
+        )
+        (asserts! (default-to false (map-get? guardians voter)) ERR-NOT-GUARDIAN)
+        (asserts! (<= stacks-block-height (get expires-at proposal-data)) ERR-PROPOSAL-EXPIRED)
+        (asserts! (is-none (map-get? proposal-votes vote-key)) ERR-ALREADY-VOTED)
+        
+        (map-set proposal-votes vote-key {
+            vote: vote,
+            voted-at: stacks-block-height
+        })
+        
+        (let (
+            (new-yes-votes (if vote (+ (get yes-votes proposal-data) u1) (get yes-votes proposal-data)))
+            (new-no-votes (if vote (get no-votes proposal-data) (+ (get no-votes proposal-data) u1)))
+            (is-passed (>= new-yes-votes (var-get required-signatures)))
+            )
+            (map-set proposals proposal-id (merge proposal-data {
+                yes-votes: new-yes-votes,
+                no-votes: new-no-votes,
+                passed: is-passed
+            }))
+        )
+        (ok true)
+    )
+)
+
+
+(define-read-only (get-proposal-info (proposal-id uint))
+    (map-get? proposals proposal-id)
+)
+
+(define-read-only (get-proposal-vote (proposal-id uint) (voter principal))
+    (map-get? proposal-votes {proposal-id: proposal-id, voter: voter})
+)
+
+(define-read-only (is-guardian (address principal))
+    (default-to false (map-get? guardians address))
+)
+
+(define-read-only (get-governance-info)
+    (ok {
+        guardian-count: (var-get guardian-count),
+        required-signatures: (var-get required-signatures),
+        proposal-count: (var-get proposal-counter)
+    })
 )
