@@ -446,41 +446,6 @@
     )
 )
 
-(define-public (execute-proposal (proposal-id uint))
-    (let (
-        (proposal-data (unwrap! (map-get? proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
-        (proposal-type (get proposal-type proposal-data))
-        (target-amount (get target-amount proposal-data))
-        (target-recipient (get target-recipient proposal-data))
-        )
-        (asserts! (default-to false (map-get? guardians tx-sender)) ERR-NOT-GUARDIAN)
-        (asserts! (get passed proposal-data) ERR-PROPOSAL-NOT-PASSED)
-        (asserts! (not (get executed proposal-data)) ERR-PROPOSAL-ALREADY-EXECUTED)
-        (asserts! (<= stacks-block-height (get expires-at proposal-data)) ERR-PROPOSAL-EXPIRED)
-        
-        (if (is-eq proposal-type "emergency-withdraw")
-            (begin
-                (asserts! (<= target-amount (var-get total-funds)) ERR-INSUFFICIENT-FUNDS)
-                (try! (as-contract (stx-transfer? target-amount tx-sender (var-get contract-owner))))
-                (var-set total-funds (- (var-get total-funds) target-amount))
-                (ok true)
-            )
-            (if (is-eq proposal-type "distribute-funds")
-                (begin
-                    (asserts! (is-some target-recipient) ERR-INVALID-AMOUNT)
-                    (asserts! (<= target-amount (var-get total-funds)) ERR-INSUFFICIENT-FUNDS)
-                    (try! (as-contract (stx-transfer? target-amount tx-sender (unwrap-panic target-recipient))))
-                    (var-set total-funds (- (var-get total-funds) target-amount))
-                    (ok true)
-                )
-                (ok false)
-            )
-        )
-        
-        (map-set proposals proposal-id (merge proposal-data {executed: true}))
-        (ok true)
-    )
-)
 
 (define-read-only (get-proposal-info (proposal-id uint))
     (map-get? proposals proposal-id)
