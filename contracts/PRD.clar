@@ -466,3 +466,277 @@
         proposal-count: (var-get proposal-counter)
     })
 )
+
+;; Geographic Distribution Zones Feature
+;; Enables zone-based relief distribution with varying amounts per region
+
+(define-constant ERR-ZONE-NOT-FOUND (err u117))
+(define-constant ERR-ZONE-ALREADY-EXISTS (err u118))
+(define-constant ERR-ZONE-INACTIVE (err u119))
+(define-constant ERR-RECIPIENT-ZONE-MISMATCH (err u120))
+(define-constant ERR-NOT-ZONE-ADMIN (err u121))
+
+(define-data-var zone-counter uint u0)
+
+;; Map to store zone information
+(define-map distribution-zones
+    uint ;; zone-id
+    {
+        zone-name: (string-ascii 50),
+        zone-code: (string-ascii 10), ;; e.g., "NY", "CA", "TX"
+        relief-multiplier: uint, ;; percentage multiplier (100 = 1x, 150 = 1.5x, 200 = 2x)
+        max-recipients: uint,
+        current-recipients: uint,
+        is-active: bool,
+        created-at: uint,
+        zone-admin: principal,
+        special-conditions: (string-ascii 100) ;; "high-risk", "rural", "urban", etc.
+    }
+)
+
+;; Map to store recipient-zone assignments
+(define-map recipient-zones
+    principal ;; recipient
+    {
+        zone-id: uint,
+        assigned-at: uint,
+        verified: bool,
+        zone-admin-approval: bool
+    }
+)
+
+;; Map to track zone-specific claims
+(define-map zone-claims
+    {zone-id: uint, recipient: principal}
+    {
+        base-amount: uint,
+        zone-adjusted-amount: uint,
+        claim-timestamp: uint,
+        verification-status: (string-ascii 20)
+    }
+)
+
+;; Zone administrators management
+(define-map zone-admins principal bool)
+
+;; Create a new distribution zone
+(define-public (create-distribution-zone 
+    (zone-name (string-ascii 50))
+    (zone-code (string-ascii 10))
+    (relief-multiplier uint)
+    (max-recipients uint)
+    (zone-admin principal)
+    (special-conditions (string-ascii 100)))
+    (let (
+        (zone-id (+ (var-get zone-counter) u1))
+        )
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (> relief-multiplier u0) ERR-INVALID-AMOUNT)
+        (asserts! (> max-recipients u0) ERR-INVALID-AMOUNT)
+        (asserts! (<= relief-multiplier u300) ERR-INVALID-AMOUNT) ;; max 3x multiplier
+        
+        (map-set distribution-zones zone-id {
+            zone-name: zone-name,
+            zone-code: zone-code,
+            relief-multiplier: relief-multiplier,
+            max-recipients: max-recipients,
+            current-recipients: u0,
+            is-active: true,
+            created-at: stacks-block-height,
+            zone-admin: zone-admin,
+            special-conditions: special-conditions
+        })
+        
+        (map-set zone-admins zone-admin true)
+        (var-set zone-counter zone-id)
+        (ok zone-id)
+    )
+)
+
+;; Assign recipient to a zone
+(define-public (assign-recipient-to-zone (recipient principal) (zone-id uint))
+    (let (
+        (zone-data (unwrap! (map-get? distribution-zones zone-id) ERR-ZONE-NOT-FOUND))
+        (recipient-data (unwrap! (map-get? registered-recipients recipient) ERR-NOT-REGISTERED))
+        )
+        (asserts! (or 
+            (is-eq tx-sender (var-get contract-owner))
+            (is-eq tx-sender (get zone-admin zone-data))
+        ) ERR-NOT-AUTHORIZED)
+        (asserts! (get is-active zone-data) ERR-ZONE-INACTIVE)
+        (asserts! (< (get current-recipients zone-data) (get max-recipients zone-data)) ERR-INSUFFICIENT-FUNDS)
+        
+        ;; Check if recipient is already assigned to this zone
+        (asserts! (is-none (map-get? recipient-zones recipient)) ERR-ALREADY-REGISTERED)
+        
+        (map-set recipient-zones recipient {
+            zone-id: zone-id,
+            assigned-at: stacks-block-height,
+            verified: false,
+            zone-admin-approval: (is-eq tx-sender (get zone-admin zone-data))
+        })
+        
+        ;; Update zone recipient count
+        (map-set distribution-zones zone-id 
+            (merge zone-data {current-recipients: (+ (get current-recipients zone-data) u1)})
+        )
+        
+        (ok true)
+    )
+)
+
+;; Verify recipient's zone assignment
+(define-public (verify-zone-assignment (recipient principal))
+    (let (
+        (zone-assignment (unwrap! (map-get? recipient-zones recipient) ERR-NOT-REGISTERED))
+        (zone-data (unwrap! (map-get? distribution-zones (get zone-id zone-assignment)) ERR-ZONE-NOT-FOUND))
+        )
+        (asserts! (is-eq tx-sender (get zone-admin zone-data)) ERR-NOT-ZONE-ADMIN)
+        
+        (map-set recipient-zones recipient 
+            (merge zone-assignment {
+                verified: true,
+                zone-admin-approval: true
+            })
+        )
+        (ok true)
+    )
+)
+
+;; Claim zone-adjusted relief
+(define-public (claim-zone-relief)
+    (let (
+        (recipient tx-sender)
+        (recipient-data (unwrap! (map-get? registered-recipients recipient) ERR-NOT-REGISTERED))
+        (zone-assignment (unwrap! (map-get? recipient-zones recipient) ERR-RECIPIENT-ZONE-MISMATCH))
+        (zone-data (unwrap! (map-get? distribution-zones (get zone-id zone-assignment)) ERR-ZONE-NOT-FOUND))
+        (base-amount (var-get relief-amount-per-person))
+        (multiplier (get relief-multiplier zone-data))
+        (adjusted-amount (/ (* base-amount multiplier) u100))
+        (claim-key {zone-id: (get zone-id zone-assignment), recipient: recipient})
+        )
+        (asserts! (var-get distribution-active) ERR-NOT-AUTHORIZED)
+        (asserts! (not (get claimed recipient-data)) ERR-ALREADY-CLAIMED)
+        (asserts! (get is-active zone-data) ERR-ZONE-INACTIVE)
+        (asserts! (get verified zone-assignment) ERR-NOT-AUTHORIZED)
+        (asserts! (>= (var-get total-funds) adjusted-amount) ERR-INSUFFICIENT-FUNDS)
+        (asserts! (is-none (map-get? zone-claims claim-key)) ERR-ALREADY-CLAIMED)
+        
+        ;; Execute transfer
+        (try! (as-contract (stx-transfer? adjusted-amount tx-sender recipient)))
+        (var-set total-funds (- (var-get total-funds) adjusted-amount))
+        
+        ;; Update recipient status
+        (map-set registered-recipients recipient (merge recipient-data {claimed: true}))
+        
+        ;; Record zone claim
+        (map-set zone-claims claim-key {
+            base-amount: base-amount,
+            zone-adjusted-amount: adjusted-amount,
+            claim-timestamp: stacks-block-height,
+            verification-status: "completed"
+        })
+        
+        ;; Update distribution records
+        (map-set distribution-records recipient {
+            amount: adjusted-amount,
+            distribution-time: stacks-block-height,
+            transaction-id: (concat (concat (get zone-code zone-data) "-") 
+                           (int-to-ascii stacks-block-height))
+        })
+        
+        (ok adjusted-amount)
+    )
+)
+
+;; Update zone relief multiplier
+(define-public (update-zone-multiplier (zone-id uint) (new-multiplier uint))
+    (let (
+        (zone-data (unwrap! (map-get? distribution-zones zone-id) ERR-ZONE-NOT-FOUND))
+        )
+        (asserts! (or 
+            (is-eq tx-sender (var-get contract-owner))
+            (is-eq tx-sender (get zone-admin zone-data))
+        ) ERR-NOT-AUTHORIZED)
+        (asserts! (> new-multiplier u0) ERR-INVALID-AMOUNT)
+        (asserts! (<= new-multiplier u300) ERR-INVALID-AMOUNT)
+        
+        (map-set distribution-zones zone-id 
+            (merge zone-data {relief-multiplier: new-multiplier})
+        )
+        (ok true)
+    )
+)
+
+;; Deactivate a zone
+(define-public (deactivate-zone (zone-id uint))
+    (let (
+        (zone-data (unwrap! (map-get? distribution-zones zone-id) ERR-ZONE-NOT-FOUND))
+        )
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        
+        (map-set distribution-zones zone-id 
+            (merge zone-data {is-active: false})
+        )
+        (ok true)
+    )
+)
+
+;; Read-only functions for zone management
+
+(define-read-only (get-zone-info (zone-id uint))
+    (map-get? distribution-zones zone-id)
+)
+
+(define-read-only (get-recipient-zone (recipient principal))
+    (map-get? recipient-zones recipient)
+)
+
+(define-read-only (get-zone-claim-info (zone-id uint) (recipient principal))
+    (map-get? zone-claims {zone-id: zone-id, recipient: recipient})
+)
+
+(define-read-only (calculate-zone-relief (zone-id uint))
+    (match (map-get? distribution-zones zone-id)
+        zone-data 
+            (let (
+                (base-amount (var-get relief-amount-per-person))
+                (multiplier (get relief-multiplier zone-data))
+                )
+                (ok (/ (* base-amount multiplier) u100))
+            )
+        ERR-ZONE-NOT-FOUND
+    )
+)
+
+(define-read-only (get-zone-statistics (zone-id uint))
+    (match (map-get? distribution-zones zone-id)
+        zone-data 
+            (ok {
+                zone-name: (get zone-name zone-data),
+                zone-code: (get zone-code zone-data),
+                current-recipients: (get current-recipients zone-data),
+                max-recipients: (get max-recipients zone-data),
+                capacity-percentage: (/ (* (get current-recipients zone-data) u100) (get max-recipients zone-data)),
+                relief-multiplier: (get relief-multiplier zone-data),
+                is-active: (get is-active zone-data)
+            })
+        ERR-ZONE-NOT-FOUND
+    )
+)
+
+(define-read-only (is-zone-admin (address principal))
+    (default-to false (map-get? zone-admins address))
+)
+
+(define-read-only (get-total-zones)
+    (ok (var-get zone-counter))
+)
+
+
+
+
+
+
+
+
